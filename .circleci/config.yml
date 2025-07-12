@@ -1,0 +1,123 @@
+version: 2.1
+
+orbs:
+  aws-cli: circleci/aws-cli@4.0.0
+  kubernetes: circleci/kubernetes@1.3.1
+
+jobs:
+  test-backend:
+    docker:
+      - image: cimg/node:18.17
+    steps:
+      - checkout
+      - run:
+          name: Install Backend Dependencies
+          command: |
+            cd application/backend
+            npm install
+      - run:
+          name: Run Backend Tests
+          command: |
+            cd application/backend
+            npm test
+      - store_artifacts:
+          path: application/backend/coverage
+
+  test-frontend:
+    docker:
+      - image: cimg/node:18.17
+    steps:
+      - checkout
+      - run:
+          name: Install Frontend Dependencies
+          command: |
+            cd application/frontend
+            npm install
+      - run:
+          name: Run Frontend Tests
+          command: |
+            cd application/frontend
+            npm test -- --coverage --watchAll=false
+      - store_artifacts:
+          path: application/frontend/coverage
+
+  build-and-push:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: 20.10.14
+          docker_layer_caching: true
+      - run:
+          name: Build and Push Application Images
+          command: |
+            echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+            
+            # Create timestamp
+            TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+            
+            # Build and push backend image
+            cd application/backend
+            docker build -t $DOCKER_USERNAME/nebulance-app:backend-$TIMESTAMP .
+            docker push $DOCKER_USERNAME/nebulance-app:backend-$TIMESTAMP
+            
+            # Build and push frontend image
+            cd ../frontend
+            docker build -t $DOCKER_USERNAME/nebulance-app:frontend-$TIMESTAMP .
+            docker push $DOCKER_USERNAME/nebulance-app:frontend-$TIMESTAMP
+            
+            # Save timestamp for deployment
+            echo "export TIMESTAMP=$TIMESTAMP" >> $BASH_ENV
+
+  deploy-to-eks:
+    docker:
+      - image: cimg/aws:stable
+    steps:
+      - checkout
+      - run:
+          name: Deploy to EKS
+          command: |
+            # Configure kubectl
+            aws eks update-kubeconfig --region eu-central-1 --name eks-nebulance
+            
+            # Use same timestamp from build job
+            TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+            
+            # Update Helm values with timestamped images
+            sed -i "s|repository: your-registry/nebulance-app|repository: $DOCKER_USERNAME/nebulance-app|g" helm-charts/values.yaml
+            sed -i "s|tag: \"frontend-1.0.0\"|tag: \"frontend-$TIMESTAMP\"|g" helm-charts/values.yaml
+            sed -i "s|tag: \"backend-1.0.0\"|tag: \"backend-$TIMESTAMP\"|g" helm-charts/values.yaml
+            
+            # Get namespace from values.yaml
+            NAMESPACE=$(grep "name: " helm-charts/values.yaml | head -1 | awk '{print $2}')
+            
+            # Create namespace if it doesn't exist
+            kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+            
+            # Deploy with Helm
+            helm upgrade --install nebulance-app helm-charts/ \
+              --namespace $NAMESPACE \
+              --timeout 10m
+
+workflows:
+  version: 2
+  build-test-deploy:
+    jobs:
+      - test-backend
+      - test-frontend
+      - build-and-push:
+          requires:
+            - test-backend
+            - test-frontend
+          filters:
+            branches:
+              only:
+                - main
+                - develop
+      - deploy-to-eks:
+          requires:
+            - build-and-push
+          filters:
+            branches:
+              only: main
