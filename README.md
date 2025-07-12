@@ -94,6 +94,11 @@ You are provided with a complete 3-tier application:
 - Backend API accessible via external LoadBalancer URL on port 3000
 - LoadBalancer health checks passing for both services
 - Auto-scaling and high availability maintained
+  
+### Task 6: Deploy the Application with CircleCI
+- Create a circleci pipleine that should automatically deploy the application when there are new code changes
+- Do nnot include the IaC in the circleci pipeline
+- Ensure proper secret and env management in the ci/cd pipeline
 
 ## Technical Specifications
 
